@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PRO Hand Tracking 3D Visualizer 5X</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+    }
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #050508;
+      font-family: 'Segoe UI', Roboto, sans-serif;
+    }
+    #container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+    video, canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    video {
+      transform: scaleX(-1);
+      filter: brightness(0.7) contrast(1.2);
+    }
+    #canvas3d {
+      pointer-events: none;
+    }
+    
+    /* HUD & UI Overlay */
+    #hud {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      z-index: 10;
+    }
+    .card {
+      background: rgba(10, 15, 30, 0.75);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(0, 243, 255, 0.3);
+      box-shadow: 0 8px 32px 0 rgba(0, 243, 255, 0.15);
+      padding: 16px 24px;
+      border-radius: 12px;
+      color: #fff;
+    }
+    .status-title {
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: #00f3ff;
+      margin-bottom: 6px;
+      font-weight: 700;
+    }
+    .status-main {
+      font-size: 20px;
+      font-weight: 600;
+      color: #ffffff;
+      text-shadow: 0 0 10px rgba(0, 243, 255, 0.5);
+    }
+    .controls-hint {
+      position: absolute;
+      bottom: 25px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(5, 5, 10, 0.85);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      padding: 12px 28px;
+      border-radius: 30px;
+      color: #e0e0e0;
+      font-size: 14px;
+      display: flex;
+      gap: 20px;
+      z-index: 10;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    .hint-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge {
+      background: rgba(0, 243, 255, 0.2);
+      color: #00f3ff;
+      border: 1px solid #00f3ff;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-weight: bold;
+      font-size: 12px;
+    }
+  </style>
+
+  <!-- Three.js & Postprocessing Bundle -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <!-- MediaPipe Tasks Vision -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+  <div id="container">
+    <video id="webcam" autoplay playsinline></video>
+    <canvas id="canvas3d"></canvas>
+
+    <div id="hud">
+      <div class="card">
+        <div class="status-title">⚡ SYSTEM STATUS</div>
+        <div id="status" class="status-main">Kamera va AI tizimi yuklanmoqda...</div>
+      </div>
+    </div>
+
+    <div class="controls-hint">
+      <div class="hint-item"><span class="badge">1-5 Barmoq</span> Shakllarni almashtirish</div>
+      <div class="hint-item"><span class="badge">2 Qo'l</span> Obyektni kattalashtirish (Zoom)</div>
+      <div class="hint-item"><span class="badge">Musht</span> Partikllar portlashi (Explode)</div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm";
+
+    let handLandmarker;
+    let video = document.getElementById('webcam');
+    let canvas3D = document.getElementById('canvas3d');
+    let statusDiv = document.getElementById('status');
+    
+    let scene, camera, renderer;
+    let currentObjectGroup, skeletonGroup, particleSystem;
+    let particlePositions, particleVelocities;
+    
+    let lastVideoTime = -1;
+    let lastFingerCount = -1;
+    let isFist = false;
+
+    // Glowing Neon Colors Palette
+    const COLORS = [
+      0x00f3ff, // Cyber Cyan
+      0xff0055, // Neon Magenta
+      0xffe600, // Electric Yellow
+      0x00ff66, // Bright Green
+      0xb000ff  // Deep Purple
+    ];
+
+    async function initMediaPipe() {
+      try {
+        statusDiv.innerText = "AI Hand Tracking yuklanmoqda...";
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+        );
+        handLandmarker = await HandLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+            delegate: "GPU"
+          },
+          runningMode: "VIDEO",
+          numHands: 2
+        });
+        statusDiv.innerText = "Kameraga ruxsat bering...";
+        startCamera();
+      } catch (err) {
+        console.error(err);
+        statusDiv.innerText = "Xatolik: AI modelni yuklab bo'lmadi!";
+      }
+    }
+
+    function initThree() {
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.z = 6;
+
+      renderer = new THREE.WebGLRenderer({ canvas: canvas3D, alpha: true, antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+      // Asosiy guruhlar
+      currentObjectGroup = new THREE.Group();
+      skeletonGroup = new THREE.Group();
+      scene.add(currentObjectGroup);
+      scene.add(skeletonGroup);
+
+      // Partikl tizimi (Cyber Particle Dust)
+      createParticleBackground();
+
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // Boshlang'ich shakl
+      buildProGeometry(4, 0x00f3ff);
+    }
+
+    function createParticleBackground() {
+      const pCount = 300;
+      const pGeo = new THREE.BufferGeometry();
+      particlePositions = new Float32Array(pCount * 3);
+      particleVelocities = [];
+
+      for (let i = 0; i < pCount; i++) {
+        particlePositions[i * 3] = (Math.random() - 0.5) * 15;
+        particlePositions[i * 3 + 1] = (Math.random() - 0.5) * 15;
+        particlePositions[i * 3 + 2] = (Math.random() - 0.5) * 10;
+
+        particleVelocities.push({
+          x: (Math.random() - 0.5) * 0.02,
+          y: (Math.random() - 0.5) * 0.02,
+          z: (Math.random() - 0.5) * 0.02
+        });
+      }
+
+      pGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+      const pMat = new THREE.PointsMaterial({
+        color: 0x00f3ff,
+        size: 0.06,
+        transparent: true,
+        opacity: 0.6,
+        blending: THREE.AdditiveBlending
+      });
+
+      particleSystem = new THREE.Points(pGeo, pMat);
+      scene.add(particleSystem);
+    }
+
+    function updateParticles() {
+      const positions = particleSystem.geometry.attributes.position.array;
+      for (let i = 0; i < particleVelocities.length; i++) {
+        positions[i * 3] += particleVelocities[i].x;
+        positions[i * 3 + 1] += particleVelocities[i].y;
+        positions[i * 3 + 2] += particleVelocities[i].z;
+
+        if (Math.abs(positions[i * 3]) > 10) particleVelocities[i].x *= -1;
+        if (Math.abs(positions[i * 3 + 1]) > 10) particleVelocities[i].y *= -1;
+      }
+      particleSystem.geometry.attributes.position.needsUpdate = true;
+    }
+
+    function buildProGeometry(type, hexColor) {
+      // Eskisini tozalash
+      while(currentObjectGroup.children.length > 0){ 
+        currentObjectGroup.remove(currentObjectGroup.children[0]); 
+      }
+
+      let baseGeo;
+      switch(type) {
+        case 1: // Hologram Ring / Torus Knot
+          baseGeo = new THREE.TorusKnotGeometry(1, 0.3, 100, 16);
+          break;
+        case 2: // Dual Cone Pyramid
+          baseGeo = new THREE.OctahedronGeometry(1.4);
+          break;
+        case 3: // Futuristic Crystal / Dodecahedron
+          baseGeo = new THREE.DodecahedronGeometry(1.3);
+          break;
+        case 4: // Hyper Cube Frame
+          baseGeo = new THREE.BoxGeometry(1.6, 1.6, 1.6);
+          break;
+        case 5: // Complex Core / Sphere Icosahedron
+          baseGeo = new THREE.IcosahedronGeometry(1.4, 1);
+          break;
+        default:
+          baseGeo = new THREE.SphereGeometry(1.2, 24, 24);
+      }
+
+      // Outer Wireframe (Yorug'lik taratuvchi simlar)
+      const wireframeGeo = new THREE.WireframeGeometry(baseGeo);
+      const wireframeMat = new THREE.LineBasicMaterial({ 
+        color: hexColor, 
+        linewidth: 2,
+        transparent: true,
+        opacity: 0.9
+      });
+      const wireMesh = new THREE.LineSegments(wireframeGeo, wireframeMat);
+      currentObjectGroup.add(wireMesh);
+
+      // Inner Glowing Core (Ichki nur sochuvchi shakl)
+      const innerMat = new THREE.MeshBasicMaterial({
+        color: hexColor,
+        wireframe: false,
+        transparent: true,
+        opacity: 0.15,
+        blending: THREE.AdditiveBlending
+      });
+      const innerMesh = new THREE.Mesh(baseGeo, innerMat);
+      currentObjectGroup.add(innerMesh);
+
+      // Node Points (Shakl burchaklaridagi nuqtalar)
+      const pMat = new THREE.PointsMaterial({
+        color: 0xffffff,
+        size: 0.08,
+        blending: THREE.AdditiveBlending
+      });
+      const pMesh = new THREE.Points(baseGeo, pMat);
+      currentObjectGroup.add(pMesh);
+    }
+
+    // Hands Skeleton Visualizer (Qo'llarga neon skelet chizish)
+    function renderHandSkeleton(landmarksArray) {
+      while(skeletonGroup.children.length > 0){ 
+        skeletonGroup.remove(skeletonGroup.children[0]); 
+      }
+
+      const CONNECTIONS = [
+        [0,1],[1,2],[2,3],[3,4],
+        [0,5],[5,6],[6,7],[7,8],
+        [5,9],[9,10],[10,11],[11,12],
+        [9,13],[13,14],[14,15],[15,16],
+        [13,17],[17,18],[18,19],[19,20],[0,17]
+      ];
+
+      landmarksArray.forEach((landmarks) => {
+        const points = landmarks.map(lm => new THREE.Vector3((0.5 - lm.x) * 7, (0.5 - lm.y) * 4.5, -lm.z * 3));
+
+        // Bo'g'inlarni tutashtiruvchi chiziqlar
+        const lineGeo = new THREE.BufferGeometry().setFromPoints(
+          CONNECTIONS.flatMap(([i, j]) => [points[i], points[j]])
+        );
+        const lineMat = new THREE.LineBasicMaterial({ color: 0x00f3ff, opacity: 0.5, transparent: true });
+        const skeletonLines = new THREE.LineSegments(lineGeo, lineMat);
+        skeletonGroup.add(skeletonLines);
+
+        // Bo'g'inlardagi nuqtalar
+        const ptsGeo = new THREE.BufferGeometry().setFromPoints(points);
+        const ptsMat = new THREE.PointsMaterial({ color: 0xff0055, size: 0.08 });
+        const skeletonPts = new THREE.Points(ptsGeo, ptsMat);
+        skeletonGroup.add(skeletonPts);
+      });
+    }
+
+    function countFingers(landmarks) {
+      let count = 0;
+      const tips = [8, 12, 16, 20];
+      const pips = [6, 10, 14, 18];
+
+      for (let i = 0; i < 4; i++) {
+        if (landmarks[tips[i]].y < landmarks[pips[i]].y) count++;
+      }
+      if (Math.abs(landmarks[4].x - landmarks[17].x) > Math.abs(landmarks[3].x - landmarks[17].x)) count++;
+      return count;
+    }
+
+    async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+        video.srcObject = stream;
+        video.addEventListener("loadeddata", () => {
+          statusDiv.innerText = "⚡ TIZIM TAYYOR!";
+          predictWebcam();
+        });
+      } catch (err) {
+        console.error(err);
+        statusDiv.innerText = "Xatolik: Kameraga kirish rad etildi!";
+      }
+    }
+
+    async function predictWebcam() {
+      if (handLandmarker && video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        const startTimeMs = performance.now();
+        const results = handLandmarker.detectForVideo(video, startTimeMs);
+
+        if (results.landmarks && results.landmarks.length > 0) {
+          // Skeletni chizish
+          renderHandSkeleton(results.landmarks);
+
+          const hand1 = results.landmarks[0];
+          const fingers = countFingers(hand1);
+
+          // Musht tugilganini aniqlash (Fist gesture)
+          if (fingers === 0 && !isFist) {
+            isFist = true;
+            statusDiv.innerText = "💥 PARTICLES EXPLODE!";
+          } else if (fingers > 0) {
+            isFist = false;
+          }
+
+          // Shaklni almashtirish
+          if (fingers !== lastFingerCount && fingers >= 1 && fingers <= 5) {
+            lastFingerCount = fingers;
+            const chosenColor = COLORS[fingers - 1];
+            buildProGeometry(fingers, chosenColor);
+            statusDiv.innerText = `SHAKL #${fingers} FAOL`;
+          }
+
+          // Positsiya va rotatsiya
+          if (currentObjectGroup) {
+            const targetX = (0.5 - hand1[9].x) * 6;
+            const targetY = (0.5 - hand1[9].y) * 4;
+
+            // Smooth Interpolation (Silliq harakatlanish)
+            currentObjectGroup.position.x += (targetX - currentObjectGroup.position.x) * 0.15;
+            currentObjectGroup.position.y += (targetY - currentObjectGroup.position.y) * 0.15;
+
+            currentObjectGroup.rotation.x += 0.015;
+            currentObjectGroup.rotation.y += 0.02;
+
+            // Musht effekti (Pulse scale)
+            if (isFist) {
+              const pulse = 1 + Math.sin(Date.now() * 0.01) * 0.3;
+              currentObjectGroup.scale.set(pulse, pulse, pulse);
+            } else if (results.landmarks.length > 1) {
+              // Ikki qo'l zoom effekti
+              const hand2 = results.landmarks[1];
+              const dist = Math.hypot(hand1[0].x - hand2[0].x, hand1[0].y - hand2[0].y);
+              const targetScale = Math.max(0.5, Math.min(dist * 3.5, 3));
+              
+              currentObjectGroup.scale.x += (targetScale - currentObjectGroup.scale.x) * 0.1;
+              currentObjectGroup.scale.y += (targetScale - currentObjectGroup.scale.y) * 0.1;
+              currentObjectGroup.scale.z += (targetScale - currentObjectGroup.scale.z) * 0.1;
+              
+              statusDiv.innerText = `🔍 ZOOM: ${(currentObjectGroup.scale.x).toFixed(1)}x`;
+            } else {
+              currentObjectGroup.scale.set(1, 1, 1);
+            }
+          }
+        } else {
+          // Qo'l ko'rinmasa skeletni tozalash
+          while(skeletonGroup.children.length > 0){ 
+            skeletonGroup.remove(skeletonGroup.children[0]); 
+          }
+        }
+      }
+
+      updateParticles();
+      renderer.render(scene, camera);
+      requestAnimationFrame(predictWebcam);
+    }
+
+    initThree();
+    initMediaPipe();
+  </script>
+</body>
+</html>
